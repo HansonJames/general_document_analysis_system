@@ -4,14 +4,11 @@ langchain-community==0.3.14
 langchain-core==0.3.29
 langchain-openai==0.2.14
 langchain-text-splitters==0.3.4
-langchain-huggingface==0.1.2
 langchain-cohere==0.3.4
-langchain-chroma==0.1.4
 
 # Document processing
 python-docx==1.1.2
 unstructured==0.16.12
-chromadb==0.5.23
 
 # Vector stores and embeddings
 sentence-transformers==3.3.1
@@ -21,7 +18,6 @@ rank-bm25==0.2.2
 python-dotenv==1.0.1
 loguru==0.7.3
 datasets==3.2.0
-huggingface-hub==0.27.0
 
 # Web interface
 gradio==5.9.1
