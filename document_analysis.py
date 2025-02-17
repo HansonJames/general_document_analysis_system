@@ -240,9 +240,8 @@ class DocumentProcessor:
                     base_compressor=self.reranker,
                     base_retriever=retriever
                 )
-                
-                return compression_retriever
                 logger.info("Vector store saved successfully")
+                return compression_retriever
 
             def create_retrievers(docs=None):
                 """创建检索器"""
@@ -260,7 +259,7 @@ class DocumentProcessor:
                 # 创建RePhraseQuery检索器
                 from langchain.prompts import PromptTemplate
                 
-                prompt_template = """Below is a user question. Please rephrase it to be more descriptive while keeping its original meaning.
+                prompt_template = """下面是一个用户问题。请改写它以使其更具描述性，同时保持其原始含义。
                 Question: {question}
                 Rephrased question:"""
                 
@@ -405,12 +404,17 @@ class DocumentAnalysis:
             # 获取所有选中文档的检索器
             retrievers = []
             for name in collection_names:
-                # 加载每个知识库
-                await self.load_knowledge(name)
+                # 获取检索器
                 collection_hash = hashlib.md5(name.encode()).hexdigest()
                 retriever = self.__retrievers.get(collection_hash)
                 if retriever:
                     retrievers.append(retriever)
+                else:
+                    # 如果检索器不存在，才加载知识库
+                    await self.load_knowledge(name)
+                    retriever = self.__retrievers.get(collection_hash)
+                    if retriever:
+                        retrievers.append(retriever)
 
             if not retrievers:
                 yield {"answer": "所选知识库尚未加载，请重新选择"}
@@ -458,7 +462,7 @@ class DocumentAnalysis:
                         logger.info(f"Processing retriever for {source}")
                         
                         # 获取文档
-                        docs = await retriever.aget_relevant_documents(question)
+                        docs = await retriever.ainvoke(question)
                         logger.info(f"Retrieved {len(docs)} documents from {source}")
                         
                         # 记录文档得分
@@ -591,29 +595,24 @@ class DocumentAnalysis:
                                 "question": question
                             })
                             
-                            # 分段返回答案
-                            chunk_size = 50  # 每次返回50个字符
-                            for i in range(0, len(answer), chunk_size):
-                                chunk = answer[i:i + chunk_size]
-                                yield {"answer": chunk}
-                                await asyncio.sleep(0.05)  # 减少延迟
-                                
+                            # 生成完整答案
+                            full_answer = await chain.ainvoke({
+                                "context": context,
+                                "question": question
+                            })
+                            
+                            # 添加到历史记录
+                            self.add_to_history(question, full_answer)
+                            
+                            # 一次性返回完整答案
+                            yield {"answer": full_answer}
+                            
                     except asyncio.TimeoutError:
                         logger.error("Answer generation timed out")
                         yield {"answer": "生成答案超时，请重试"}
                     except Exception as e:
                         logger.error(f"Error generating answer: {str(e)}")
                         yield {"answer": "生成答案时出现错误"}
-                    
-                    # 添加到历史记录
-                    self.add_to_history(question, answer)
-                    
-                    # 分段返回答案
-                    chunk_size = 50  # 每次返回50个字符
-                    for i in range(0, len(answer), chunk_size):
-                        chunk = answer[i:i + chunk_size]
-                        yield {"answer": chunk}
-                        await asyncio.sleep(0.05)  # 减少延迟
                 except Exception as e:
                     logger.error(f"Error generating answer: {str(e)}")
                     yield {"answer": "生成答案时出现错误"}
@@ -657,53 +656,45 @@ class DocumentAnalysis:
                     try:
                         # 得到知识库的路径
                         file_path = os.path.join(knowledge_path, file)
-                        logger.info(f'file_path: {file_path}')
-
-                        # 知识库文件名进行md5编码
                         collection_name = hashlib.md5(file.encode()).hexdigest()
-                        logger.info(f'collection_name: {collection_name}')
+                        persist_dir = os.path.abspath(os.path.join(faiss_path, collection_name)).replace("\\", "/")
 
-                        logger.info(f'self.__retrievers: {self.__retrievers}')
+                        # 如果检索器已存在，直接返回
+                        if collection_name in self.__retrievers:
+                            return file
 
                         # 检查向量存储是否已存在
-                        persist_dir = os.path.abspath(os.path.join(faiss_path, collection_name)).replace("\\", "/")
                         if os.path.exists(persist_dir) and os.path.exists(os.path.join(persist_dir, "index.faiss")):
-                            logger.info(f"Loading existing vector store from {persist_dir}")
-                            # 异步加载已存在的向量存储
-                            if collection_name not in self.__retrievers:
-                                retriever = await self.processor.process_document(file_path, persist_dir)
-                                if retriever:
-                                    self.__retrievers[collection_name] = retriever
-                                    logger.info(f"Successfully loaded vector store for {file}")
-                                else:
-                                    logger.error(f"Failed to load vector store for {file}")
-                                    return None
-                        else:
-                            # 异步创建新的向量存储
-                            logger.info(f"Creating new vector store in {persist_dir}")
-                            loader = MyCustomLoader(file_path)
-                            logger.info(f'loader: {loader}')
+                            logger.info(f"Loading vector store for {file}")
                             retriever = await self.processor.process_document(file_path, persist_dir)
-                            if retriever:
-                                self.__retrievers[collection_name] = retriever
-                                logger.info(f"Successfully created vector store for {file}")
-                            else:
-                                logger.error(f"Failed to create vector store for {file}")
-                                return None
+                        else:
+                            logger.info(f"Creating new vector store for {file}")
+                            retriever = await self.processor.process_document(file_path, persist_dir)
 
-                        return file
+                        if retriever:
+                            self.__retrievers[collection_name] = retriever
+                            logger.info(f"Successfully processed {file}")
+                            return file
+                        else:
+                            logger.error(f"Failed to process {file}")
+                            return None
+
                     except Exception as e:
-                        logger.error(f"Error processing file {file}: {str(e)}")
+                        logger.error(f"Error processing {file}: {str(e)}")
                         return None
 
-                # 并发处理所有文件
-                tasks = [process_file(file) for file in files_to_process]
-                results = await asyncio.gather(*tasks)
-                loaded_files = [f for f in results if f is not None]
-
-            logger.info(f"Loaded files: {loaded_files}")
-            logger.info(f"self.__retrievers: {self.__retrievers}")
-            return loaded_files
+                # 使用异步任务组并发处理所有文件
+                async with asyncio.TaskGroup() as tg:
+                    tasks = [tg.create_task(process_file(file)) for file in files_to_process]
+                    results = [await task for task in tasks]
+                    loaded_files = [f for f in results if f is not None]
+    
+                if loaded_files:
+                    logger.info(f"Successfully loaded {len(loaded_files)} files")
+                    return loaded_files
+                else:
+                    logger.warning("No files were loaded successfully")
+                    return []
 
         except Exception as e:
             logger.error(f"Error in load_knowledge: {str(e)}")
@@ -812,14 +803,27 @@ async def main():
             logger.error(f"Error uploading document: {result[0]}")
             return
 
+        # 加载知识库
+        loaded_files = await doc_analysis.load_knowledge()
+        if not loaded_files:
+            logger.error("No knowledge base files loaded")
+            return
+
         # 测试问答
-        questions = ["为什么鸡吃小石子", "为什么鸽子会成双成对", "为什么燕子低飞要下雨"]
+        questions = ["为什么鸡吃小石子", "为什么鸽子会成双成对"]
 
         for question in questions:
             logger.info(f"\n问题: {question}")
-            result = await doc_analysis.query(question)
+            # 使用所有已加载的知识库
+            result = await doc_analysis.query(question, loaded_files)
             logger.info("回答：")
             logger.info(result["answer"])
+            if "sources" in result:
+                logger.info("来源：")
+                # 去重来源信息
+                unique_sources = list(dict.fromkeys(result["sources"]))
+                for source in unique_sources[:2]:  # 只显示前两个最相关的来源
+                    logger.info(f"- {source[:200]}...")
 
     finally:
         doc_analysis.cleanup()
